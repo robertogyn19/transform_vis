@@ -1,5 +1,6 @@
 import chrome from 'ui/chrome';
 import { dashboardContextProvider } from 'plugins/kibana/dashboard/dashboard_context'
+import { singleQueryBackwardCapability } from './backward_capability';
 
 const Mustache = require('mustache');
 
