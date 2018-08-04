@@ -10,10 +10,10 @@ import { createRequestHandler } from './request_handler';
 
 import optionsTemplate from './options_template.html';
 import 'plugins/transform_vis/editor_controller';
-  
+
 function TransformVisProvider(Private, es, indexPatterns, $sanitize, timefilter) {
   const VisFactory = Private(VisFactoryProvider);
-  
+
   return VisFactory.createBaseVisualization({
     name: 'transform',
     title: 'Transform',
@@ -25,29 +25,33 @@ function TransformVisProvider(Private, es, indexPatterns, $sanitize, timefilter)
       defaults: {
         meta: `({
   count_hits: function() {
-    return this.response.hits.total;
+    return this.response.logstash_query.hits.total;
   }
 })`,
-          querydsl: `{
-  "query": {
-    "bool": {
-      "must": [
-        "_DASHBOARD_CONTEXT_"
-      ]
+        multiquerydsl: `{
+  "logstash_query": {
+    "index": "logstash-*",
+    "query": {
+      "bool": {
+        "must": [
+          "_DASHBOARD_CONTEXT_",
+          "_TIME_RANGE_[@timestamp]"
+        ]
+      }
     }
   }
 }`,
-        formula: '<hr>{{response.hits.total}} total hits<hr>'
+        formula: '<hr>{{response.logstash_query.hits.total}} total hits<hr>',
       },
     },
     editorConfig: {
-      optionsTemplate: optionsTemplate
+      optionsTemplate: optionsTemplate,
     },
     requestHandler: createRequestHandler(Private, es, indexPatterns, $sanitize, timefilter),
     responseHandler: 'none',
     options: {
-      showIndexSelection: false
-    }
+      showIndexSelection: false,
+    },
   });
 }
 

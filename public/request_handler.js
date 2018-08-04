@@ -4,87 +4,84 @@ import { singleQueryBackwardCapability } from './backward_capability';
 
 const Mustache = require('mustache');
 
-export const createRequestHandler = function(Private, es, indexPatterns, $sanitize, timefilter) {
-  
-    const myRequestHandler = (vis, appState, uiState, searchSource) => {
-  
-      const dashboardContext = Private(dashboardContextProvider);
-      const options = chrome.getInjected('transformVisOptions');
-      
-      return new Promise((resolve, reject) => {
-        
-        function display_error(message) {
-          resolve({ html: `<div style="text-align: center;"><i>${message}</i></div>`});
+export const createRequestHandler = function (Private, es, indexPatterns, $sanitize, timefilter) {
+
+  const myRequestHandler = (vis, appState, uiState, searchSource) => {
+
+    const dashboardContext = Private(dashboardContextProvider);
+    const options = chrome.getInjected('transformVisOptions');
+
+    function display_error(message) {
+      return ({ html: `<div style="text-align: center;"><i>${message}</i></div>` });
+    }
+
+    return singleQueryBackwardCapability(indexPatterns, vis, false)
+      .then(function () {
+        if (!vis.params.multiquerydsl) {
+          return display_error('Multy Query DSL is empty');
         }
 
-        function search(indexPattern){
-                  
-          // This is part of what should be a wider config validation
-          if (indexPattern === undefined || indexPattern.id === undefined) {
-            display_error("No Index Pattern");
-            return;
-          } 
-    
-          const context = dashboardContext();
-          
-          if (indexPattern.timeFieldName) {
-            const timefilterdsl = {range: {}};
-            timefilterdsl.range[indexPattern.timeFieldName] = {gte: timefilter.time.from, lte: timefilter.time.to};
-            context.bool.must.push(timefilterdsl);
-          }
-      
-          const body = JSON.parse(vis.params.querydsl.replace('"_DASHBOARD_CONTEXT_"', JSON.stringify(context)));
-      
-          es.search({
-            index: indexPattern.title,
-            body: body
-          }, function (error, response) {
-    
-            if (error) {
-              display_error("Error (See Console)");
-              console.log("Elasticsearch Query Error", error);
-              return;
-            } else {
-              const formula = vis.params.formula;
-              const bindme = {};
-              bindme.context = context;
-              bindme.response = response;
-              bindme.error = error;
-              if (options.allow_unsafe) {
-                try {
-                  bindme.meta = eval(vis.params.meta);
-                } catch (jserr) {
-                  bindme.jserr = jserr;
-                  display_error("Error (See Console)");
-                  console.log("Javascript Compilation Error", jserr);
-                  return; // Abort!
-                }
-                if (typeof bindme.meta.before_render === "function") { bindme.meta.before_render(); }
-                resolve({ 
-                  html: Mustache.render(formula, bindme), 
-                  after_render: bindme.meta.after_render
-                });
-              
-              } else {
-                resolve({ html: $sanitize(Mustache.render(formula, bindme)) });
-              }
-              
-            }
-            
-          });
-    
+        const context = dashboardContext();
+
+        let multiquerydsl = {};
+        try {
+          let multiquerydsltext = vis.params.multiquerydsl;
+          multiquerydsltext = multiquerydsltext.replace(/"_DASHBOARD_CONTEXT_"/g, JSON.stringify(context));
+          multiquerydsltext = multiquerydsltext.replace(/"_TIME_RANGE_\[([^\]]*)\]"/g, `{"range":{"$1":{"gte": "${timefilter.time.from}", "lte": "${timefilter.time.to}"}}}`);
+          multiquerydsl = JSON.parse(multiquerydsltext);
+        } catch (error) {
+          console.log("MultiqueryDSL Parse Error", error);
+          return display_error('Error (See Console)');
         }
-        
-        indexPatterns.get(vis.params.indexpattern).then(function (indexPattern) {
-          search(indexPattern);
-        });
-        
+
+        const bindme = {};
+        bindme.context = context;
+        bindme.response = {};
+
+        return Promise.all(Object.keys(multiquerydsl).map(
+          function (query_name) {
+            const body = multiquerydsl[query_name];
+            const index = body['index'];
+            delete body['index'];
+            return es.search({
+              index: index,
+              body: body,
+            }).then(function (response) {
+              if (query_name === '_single_') {
+                bindme.response = Object.assign(bindme.response, response);
+              } else {
+                bindme.response = Object.assign(bindme.response, { [query_name]: response });
+              }
+            });
+          },
+        ))
+          .then(function () {
+            if (options.allow_unsafe) {
+              try {
+                const response = bindme.response;
+                bindme.meta = eval(vis.params.meta);
+              } catch (jserr) {
+                bindme.jserr = jserr;
+                console.log("Javascript Compilation Error", jserr);
+                return display_error('Error (See Console)');
+              }
+            }
+            const formula = vis.params.formula;
+            try {
+              return ({ html: Mustache.render(formula, bindme) });
+            } catch (error) {
+              console.log("Mustache Template Error", error);
+              return display_error('Error (See Console)');
+            }
+          })
+          .catch(function (error) {
+            console.log("Elasticsearch Query Error", error);
+            return display_error('Error (See Console)');
+          })
       });
-  
-    };
-  
-    return myRequestHandler;
-    
-  } 
- 
-  
+
+  };
+
+  return myRequestHandler;
+
+};
