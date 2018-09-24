@@ -1,8 +1,11 @@
 import chrome from 'ui/chrome';
 import { dashboardContextProvider } from 'plugins/kibana/dashboard/dashboard_context'
 import { singleQueryBackwardCapability } from './backward_capability';
+import { transform } from '@babel/standalone';
 
 const Mustache = require('mustache');
+
+const babelTransform = (code) => transform(code, { presets: ['es2015'] }).code;
 
 export const createRequestHandler = function (Private, es, indexPatterns, $sanitize, timefilter) {
 
@@ -11,12 +14,16 @@ export const createRequestHandler = function (Private, es, indexPatterns, $sanit
     const dashboardContext = Private(dashboardContextProvider);
     const options = chrome.getInjected('transformVisOptions');
 
-    function display_error(message) {
-      return ({ html: `<div style="text-align: center;"><i>${message}</i></div>` });
-    }
+    const display_error = (displayMessage, consoleMessage, error) => {
+      if (consoleMessage !== undefined && error !== undefined) {
+        console.log(consoleMessage, error);
+      }
+      return ({ html: `<div style="text-align: center;"><i>${displayMessage}</i></div>` });
+    };
+
 
     return singleQueryBackwardCapability(indexPatterns, vis, false)
-      .then(function () {
+      .then(() => {
         if (!vis.params.multiquerydsl) {
           return display_error('Multy Query DSL is empty');
         }
@@ -30,54 +37,77 @@ export const createRequestHandler = function (Private, es, indexPatterns, $sanit
           multiquerydsltext = multiquerydsltext.replace(/"_TIME_RANGE_\[([^\]]*)\]"/g, `{"range":{"$1":{"gte": "${timefilter.time.from}", "lte": "${timefilter.time.to}"}}}`);
           multiquerydsl = JSON.parse(multiquerydsltext);
         } catch (error) {
-          console.log("MultiqueryDSL Parse Error", error);
-          return display_error('Error (See Console)');
+          return display_error('Error (See Console)', 'MultiqueryDSL Parse Error', error);
         }
 
         const bindme = {};
         bindme.context = context;
         bindme.response = {};
 
-        return Promise.all(Object.keys(multiquerydsl).map(
-          function (query_name) {
-            const body = multiquerydsl[query_name];
-            const index = body['index'];
-            delete body['index'];
-            return es.search({
-              index: index,
-              body: body,
-            }).then(function (response) {
-              if (query_name === '_single_') {
-                bindme.response = Object.assign(bindme.response, response);
-              } else {
-                bindme.response = Object.assign(bindme.response, { [query_name]: response });
-              }
-            });
-          },
-        ))
-          .then(function () {
-            if (options.allow_unsafe) {
-              try {
-                const response = bindme.response;
-                bindme.meta = eval(vis.params.meta);
-              } catch (jserr) {
-                bindme.jserr = jserr;
-                console.log("Javascript Compilation Error", jserr);
-                return display_error('Error (See Console)');
-              }
+        const fillPrevioudContext = (body, previousContextValue) =>
+          Object.keys(body).map(key => {
+            if (body[key] === '_PREVIOUS_CONTEXT_') {
+              body[key] = previousContextValue;
+            } else if (typeof body[key] === 'object') {
+              fillPrevioudContext(body[key], previousContextValue);
             }
-            const formula = vis.params.formula;
+          });
+
+        const makeQuery = (query_name) => {
+          const body = multiquerydsl[query_name];
+          const index = body['index'];
+          delete body['index'];
+          if (body.previousContextSource !== undefined) {
+            const previousContextSource = body.previousContextSource;
             try {
-              return ({ html: Mustache.render(formula, bindme) });
+              const response = bindme.response;
+              const meta = bindme.meta;
+              const previousContextValue = eval(babelTransform(previousContextSource));
+              fillPrevioudContext(body, typeof previousContextValue === 'function' ? previousContextValue() : previousContextValue);
             } catch (error) {
-              console.log("Mustache Template Error", error);
-              return display_error('Error (See Console)');
+              return display_error('Error (See Console)', 'Previous Context Parse Error', error);
             }
-          })
-          .catch(function (error) {
-            console.log("Elasticsearch Query Error", error);
-            return display_error('Error (See Console)');
-          })
+            delete body['previousContextSource'];
+          }
+          return es.search({
+            index: index,
+            body: body,
+          }).then(function (response) {
+            if (query_name === '_single_') {
+              bindme.response = Object.assign(bindme.response, response);
+            } else {
+              bindme.response = Object.assign(bindme.response, { [query_name]: response });
+            }
+          });
+        };
+
+        const evalMeta = () => {
+          if (options.allow_unsafe) {
+            try {
+              const response = bindme.response;
+              bindme.meta = eval(babelTransform(vis.params.meta));
+            } catch (jserr) {
+              bindme.jserr = jserr;
+              return display_error('Error (See Console)', 'Javascript Compilation Error', jserr);
+            }
+          }
+        };
+
+        const fillTempate = () => {
+          const formula = vis.params.formula;
+          try {
+            return ({ html: Mustache.render(formula, bindme) });
+          } catch (error) {
+            return display_error('Error (See Console)', 'Mustache Template Error', error);
+          }
+        };
+
+        return Promise.all(Object.keys(multiquerydsl).filter(query => multiquerydsl[query].previousContextSource === undefined).map(makeQuery))
+          .then(evalMeta)
+          .then(_ => Object.keys(multiquerydsl).filter(query => multiquerydsl[query].previousContextSource !== undefined).reduce((acc,curr) => acc.then(_ => makeQuery(curr)), Promise.resolve()))
+          .then(evalMeta)
+          .then(fillTempate)
+          .catch(error => display_error('Error (See Console)', 'Elasticsearch Query Error', error))
       });
 
   };
