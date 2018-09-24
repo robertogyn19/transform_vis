@@ -7,9 +7,15 @@ const Mustache = require('mustache');
 
 const babelTransform = (code) => transform(code, { presets: ['es2015'] }).code;
 
-export const createRequestHandler = function (Private, es, indexPatterns, $sanitize, timefilter) {
+export const createRequestHandler = function (Private, es, indexPatterns, $sanitize) {
 
-  const myRequestHandler = (vis, appState, uiState, searchSource) => {
+  const myRequestHandler = (vis, state) => {
+
+    var { appState, uiState, query, filters, timeRange, searchSource } = state;
+
+    /* As per https://github.com/elastic/kibana/issues/17722 dashboard_context will go away soon.
+      The proper way to read the dashboard context is to use `filters` and `query` from the above
+      object, however as of 6.4, these variables are coming up undefined */
 
     const dashboardContext = Private(dashboardContextProvider);
     const options = chrome.getInjected('transformVisOptions');
@@ -34,7 +40,7 @@ export const createRequestHandler = function (Private, es, indexPatterns, $sanit
         try {
           let multiquerydsltext = vis.params.multiquerydsl;
           multiquerydsltext = multiquerydsltext.replace(/"_DASHBOARD_CONTEXT_"/g, JSON.stringify(context));
-          multiquerydsltext = multiquerydsltext.replace(/"_TIME_RANGE_\[([^\]]*)\]"/g, `{"range":{"$1":{"gte": "${timefilter.time.from}", "lte": "${timefilter.time.to}"}}}`);
+          multiquerydsltext = multiquerydsltext.replace(/"_TIME_RANGE_\[([^\]]*)\]"/g, `{"range":{"$1":{"gte": "${timeRange.time.from}", "lte": "${timeRange.time.to}"}}}`);
           multiquerydsl = JSON.parse(multiquerydsltext);
         } catch (error) {
           return display_error('Error (See Console)', 'MultiqueryDSL Parse Error', error);
